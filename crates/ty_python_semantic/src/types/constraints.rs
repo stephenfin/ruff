@@ -70,6 +70,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt::Display;
 use std::ops::Range;
+use std::rc::Rc;
 
 use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1778,11 +1779,22 @@ impl<'db> Node<'db> {
             db: &'db dyn Db,
             node: Node<'db>,
             prefix: &'a dyn Display,
+            seen: Rc<RefCell<FxOrderSet<InteriorNode<'db>>>>,
         }
 
         impl<'a, 'db> DisplayNode<'a, 'db> {
-            fn new(db: &'db dyn Db, node: Node<'db>, prefix: &'a dyn Display) -> Self {
-                Self { db, node, prefix }
+            fn new(
+                db: &'db dyn Db,
+                node: Node<'db>,
+                prefix: &'a dyn Display,
+                seen: Rc<RefCell<FxOrderSet<InteriorNode<'db>>>>,
+            ) -> Self {
+                Self {
+                    db,
+                    node,
+                    prefix,
+                    seen,
+                }
             }
         }
 
@@ -1792,9 +1804,13 @@ impl<'db> Node<'db> {
                     Node::AlwaysTrue => write!(f, "always"),
                     Node::AlwaysFalse => write!(f, "never"),
                     Node::Interior(interior) => {
+                        let (index, is_new) = self.seen.borrow_mut().insert_full(interior);
+                        if !is_new {
+                            return write!(f, "<{index}> SHARED");
+                        }
                         write!(
                             f,
-                            "{} {}/{}",
+                            "<{index}> {} {}/{}",
                             interior.constraint(self.db).display(self.db),
                             interior.source_order(self.db),
                             interior.max_source_order(self.db),
@@ -1808,7 +1824,8 @@ impl<'db> Node<'db> {
                             DisplayNode::new(
                                 self.db,
                                 interior.if_true(self.db),
-                                &format_args!("{}│   ", self.prefix)
+                                &format_args!("{}│   ", self.prefix),
+                                Rc::clone(&self.seen),
                             ),
                         )?;
                         write!(
@@ -1818,7 +1835,8 @@ impl<'db> Node<'db> {
                             DisplayNode::new(
                                 self.db,
                                 interior.if_false(self.db),
-                                &format_args!("{}    ", self.prefix)
+                                &format_args!("{}    ", self.prefix),
+                                Rc::clone(&self.seen),
                             ),
                         )?;
                         Ok(())
@@ -1827,7 +1845,7 @@ impl<'db> Node<'db> {
             }
         }
 
-        DisplayNode::new(db, self, prefix)
+        DisplayNode::new(db, self, prefix, Rc::default())
     }
 }
 
@@ -3995,30 +4013,18 @@ mod tests {
     #[test]
     fn test_display_graph_output() {
         let expected = indoc! {r#"
-            (T = str) 3/4
-            ┡━₁ (T = bool) 4/4
-            │   ┡━₁ (U = str) 1/2
-            │   │   ┡━₁ (U = bool) 2/2
+            <0> (T = str) 3/4
+            ┡━₁ <1> (T = bool) 4/4
+            │   ┡━₁ <2> (U = str) 1/2
+            │   │   ┡━₁ <3> (U = bool) 2/2
             │   │   │   ┡━₁ always
             │   │   │   └─₀ always
-            │   │   └─₀ (U = bool) 2/2
+            │   │   └─₀ <4> (U = bool) 2/2
             │   │       ┡━₁ always
             │   │       └─₀ never
-            │   └─₀ (U = str) 1/2
-            │       ┡━₁ (U = bool) 2/2
-            │       │   ┡━₁ always
-            │       │   └─₀ always
-            │       └─₀ (U = bool) 2/2
-            │           ┡━₁ always
-            │           └─₀ never
-            └─₀ (T = bool) 4/4
-                ┡━₁ (U = str) 1/2
-                │   ┡━₁ (U = bool) 2/2
-                │   │   ┡━₁ always
-                │   │   └─₀ always
-                │   └─₀ (U = bool) 2/2
-                │       ┡━₁ always
-                │       └─₀ never
+            │   └─₀ <2> SHARED
+            └─₀ <5> (T = bool) 4/4
+                ┡━₁ <2> SHARED
                 └─₀ never
         "#}
         .trim_end();
