@@ -236,6 +236,9 @@ final_value = global_counter
 
     #[test]
     fn except_handler_variable_references() {
+        // Note: This finds all bindings of `err` in scope, including both except handlers.
+        // This is consistent with how patterns work - definitions_for_name returns all
+        // definitions of the name in scope.
         let test = cursor_test(
             "
 try:
@@ -252,7 +255,7 @@ except ValueError as err:
         );
 
         assert_snapshot!(test.references(), @"
-        info[references]: Found 4 references
+        info[references]: Found 5 references
           --> main.py:4:29
            |
          2 | try:
@@ -267,6 +270,7 @@ except ValueError as err:
          8 | try:
          9 |     y = 2 / 0
         10 | except ValueError as err:
+           |                      ---
         11 |     print(f'Different error: {err}')
            |                               ---
            |

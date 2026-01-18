@@ -345,13 +345,9 @@ impl GotoTarget<'_> {
                 let (_, ty) = ty_python_semantic::definitions_for_unary_op(model, expression)?;
                 Some(ty)
             }
-            GotoTarget::ExceptVariable(except_handler) => {
-                let definition =
-                    ty_python_semantic::definition_for_except_handler(model, except_handler)?;
-                ResolvedDefinition::Definition(definition).binding_type(model.db())
-            }
             // TODO: Support identifier targets
-            GotoTarget::PatternMatchRest(_)
+            GotoTarget::ExceptVariable(_)
+            | GotoTarget::PatternMatchRest(_)
             | GotoTarget::PatternKeywordArgument(_)
             | GotoTarget::PatternMatchStarName(_)
             | GotoTarget::PatternMatchAsName(_)
@@ -455,14 +451,17 @@ impl GotoTarget<'_> {
                 call_expression,
             )),
 
-            // Exception variables have their own definition (like parameters).
-            GotoTarget::ExceptVariable(except_handler) => {
-                ty_python_semantic::definition_for_except_handler(model, except_handler)
-                    .map(|def| vec![ResolvedDefinition::Definition(def)])
-            }
-
-            // Patterns are glorified assignments but we have to look them up by ident
+            // Exception variables and patterns are looked up by identifier
             // because they're not expressions
+            GotoTarget::ExceptVariable(except_handler) => except_handler.name.as_ref().map(|name| {
+                definitions_for_name(
+                    model,
+                    name.as_str(),
+                    AnyNodeRef::Identifier(name),
+                    alias_resolution,
+                )
+            }),
+
             GotoTarget::PatternMatchRest(pattern_mapping) => {
                 pattern_mapping.rest.as_ref().map(|name| {
                     definitions_for_name(

@@ -282,10 +282,6 @@ impl<'db> SemanticModel<'db> {
                     .scope(self.db)
                     .file_scope_id(self.db),
             ),
-            ast::AnyNodeRef::ExceptHandlerExceptHandler(handler) => {
-                // Use the handler's text range to find the enclosing scope.
-                index.try_expression_scope_id(handler)
-            }
             ast::AnyNodeRef::TypeParamTypeVar(var) => {
                 Some(var.definition(self).scope(self.db).file_scope_id(self.db))
             }
@@ -604,10 +600,6 @@ impl HasTrackedScope for &ast::ExprRef<'_> {}
 // That allows us to look up the identifier's scope for as long as it's
 // inside an expression (because the ranges overlap).
 impl HasTrackedScope for ast::Identifier {}
-
-// Similarly, `ExceptHandlerExceptHandler` can look up its scope using
-// its text range when it doesn't have a name binding.
-impl HasTrackedScope for ast::ExceptHandlerExceptHandler {}
 
 #[cfg(test)]
 mod tests {
