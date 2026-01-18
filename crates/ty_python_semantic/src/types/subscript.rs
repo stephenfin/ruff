@@ -24,7 +24,8 @@ use super::special_form::SpecialFormType;
 use super::tuple::{Tuple, TupleSpec};
 use super::visitor::any_over_type;
 use super::{
-    DynamicType, KnownInstanceType, Type, TypeAliasType, UnionBuilder, UnionType, todo_type,
+    DynamicType, IntersectionBuilder, KnownInstanceType, Type, TypeAliasType, UnionBuilder,
+    UnionType, todo_type,
 };
 
 #[derive(Debug)]
@@ -321,6 +322,43 @@ impl<'db> Type<'db> {
             }
         }
 
+        fn try_intersection<'db, F>(
+            db: &'db dyn Db,
+            elements: impl Iterator<Item = Type<'db>>,
+            mut op: F,
+        ) -> Result<Type<'db>, SubscriptError<'db>>
+        where
+            F: FnMut(Type<'db>) -> Result<Type<'db>, SubscriptError<'db>>,
+        {
+            let mut results = Vec::new();
+            let mut errors = Vec::new();
+
+            for element in elements {
+                match op(element) {
+                    Ok(result) => results.push(result),
+                    Err(error) => errors.push(error),
+                }
+            }
+
+            if results.is_empty() {
+                if let Some(first) = errors.pop() {
+                    let result_ty = first.result_type();
+                    let mut all_errors = first.into_errors();
+                    for error in errors {
+                        all_errors.extend(error.into_errors());
+                    }
+                    return Err(SubscriptError::with_errors(result_ty, all_errors));
+                }
+                return Ok(Type::unknown());
+            }
+
+            let mut builder = IntersectionBuilder::new(db);
+            for result in results {
+                builder = builder.add_positive(result);
+            }
+            Ok(builder.build())
+        }
+
         let legacy_generic_class_context = |typevars: Type<'db>| -> Result<
             GenericContext<'db>,
             LegacyGenericContextError<'db>,
@@ -419,8 +457,30 @@ impl<'db> Type<'db> {
                 )
             })),
 
-            (Type::Intersection(_), _) | (_, Type::Intersection(_)) => {
-                Some(Ok(todo_type!("Subscript expressions with intersections")))
+            (Type::Intersection(intersection), _) => {
+                Some(try_intersection(db, intersection.iter_positive(db), |element| {
+                    element.subscript(
+                        db,
+                        slice_ty,
+                        expr_context,
+                        scope_id,
+                        index,
+                        typevar_binding_context,
+                    )
+                }))
+            }
+
+            (_, Type::Intersection(intersection)) => {
+                Some(try_intersection(db, intersection.iter_positive(db), |element| {
+                    value_ty.subscript(
+                        db,
+                        element,
+                        expr_context,
+                        scope_id,
+                        index,
+                        typevar_binding_context,
+                    )
+                }))
             }
 
             // Ex) Given `("a", "b", "c", "d")[1]`, return `"b"`
