@@ -4227,8 +4227,7 @@ def function():
         assert_snapshot!(test.hover(), @"Hover provided no content");
     }
 
-    /// Hovering on the definition site of an except variable returns no content,
-    /// consistent with pattern definition sites.
+    /// Test that hovering on a valid except block with a name shows the type.
     #[test]
     fn hover_except_block_with_name() {
         let test = cursor_test(
@@ -4240,7 +4239,26 @@ def function():
         "#,
         );
 
-        assert_snapshot!(test.hover(), @"Hover provided no content");
+        assert_snapshot!(test.hover(), @r"
+        Exception
+        ---------------------------------------------
+        ```python
+        Exception
+        ```
+        ---------------------------------------------
+        info[hover]: Hovered content is
+         --> main.py:4:21
+          |
+        2 | try:
+        3 |     print()
+        4 | except Exception as e:
+          |                     -
+          |                     |
+          |                     source
+          |                     Cursor offset
+        5 |     pass
+          |
+        ");
     }
 
     impl CursorTest {

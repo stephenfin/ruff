@@ -346,8 +346,17 @@ impl GotoTarget<'_> {
                 Some(ty)
             }
             // TODO: Support identifier targets
-            GotoTarget::ExceptVariable(_)
-            | GotoTarget::PatternMatchRest(_)
+            GotoTarget::ExceptVariable(except_handler) => {
+                let name = except_handler.name.as_ref()?;
+                let definitions = definitions_for_name(
+                    model,
+                    name.as_str(),
+                    AnyNodeRef::Identifier(name),
+                    ImportAliasResolution::ResolveAliases,
+                );
+                definitions.first()?.binding_type(model.db())
+            }
+            GotoTarget::PatternMatchRest(_)
             | GotoTarget::PatternKeywordArgument(_)
             | GotoTarget::PatternMatchStarName(_)
             | GotoTarget::PatternMatchAsName(_)
