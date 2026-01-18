@@ -4466,7 +4466,6 @@ dependencies = [
  "get-size2",
  "insta",
  "itertools 0.14.0",
- "memchr",
  "rayon",
  "regex",
  "ruff_db",

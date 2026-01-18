@@ -32,16 +32,14 @@
 use crate::Db;
 use bitflags::bitflags;
 use itertools::Itertools;
-use memchr::memchr_iter;
 use ruff_db::files::File;
 use ruff_db::parsed::parsed_module;
-use ruff_db::source::source_text;
 use ruff_python_ast::visitor::source_order::{
     SourceOrderVisitor, TraversalSignal, walk_arguments, walk_expr, walk_stmt,
 };
 use ruff_python_ast::{
-    self as ast, AnyNodeRef, AnyStringFlags, BytesLiteral, Expr, FString,
-    InterpolatedStringElement, Stmt, StringLiteral, TString, TypeParam,
+    self as ast, AnyNodeRef, BytesLiteral, Expr, FString, InterpolatedStringElement, Stmt,
+    StringLiteral, TString, TypeParam,
 };
 use ruff_text_size::{Ranged, TextLen, TextRange, TextSize};
 use std::ops::Deref;
@@ -71,12 +69,11 @@ pub enum SemanticTokenType {
     Decorator,
     BuiltinConstant,
     TypeParameter,
-    EscapeSequence,
 }
 
 impl SemanticTokenType {
     /// Returns all supported semantic token types as enum variants.
-    pub const fn all() -> [SemanticTokenType; 16] {
+    pub const fn all() -> [SemanticTokenType; 15] {
         [
             SemanticTokenType::Namespace,
             SemanticTokenType::Class,
@@ -93,7 +90,6 @@ impl SemanticTokenType {
             SemanticTokenType::Decorator,
             SemanticTokenType::BuiltinConstant,
             SemanticTokenType::TypeParameter,
-            SemanticTokenType::EscapeSequence,
         ]
     }
 
@@ -121,7 +117,6 @@ impl SemanticTokenType {
             SemanticTokenType::Decorator => "decorator",
             SemanticTokenType::BuiltinConstant => "builtinConstant",
             SemanticTokenType::TypeParameter => "typeParameter",
-            SemanticTokenType::EscapeSequence => "escapeSequence",
         }
     }
 }
@@ -264,175 +259,6 @@ impl<'db> SemanticTokenVisitor<'db> {
             token_type,
             modifiers,
         });
-    }
-
-    /// Add string tokens with escape sequence highlighting.
-    ///
-    /// This method scans the source text in the given range for escape sequences
-    /// and emits separate tokens for regular string content and escape sequences.
-    /// Raw strings (with r/R prefix) don't have escape sequences, so they are
-    /// emitted as a single String token.
-    fn add_string_tokens_with_escapes(
-        &mut self,
-        range: TextRange,
-        flags: AnyStringFlags,
-        modifiers: SemanticTokenModifier,
-    ) {
-        // Raw strings don't have escape sequences
-        if flags.is_raw_string() {
-            self.add_token(range, SemanticTokenType::String, modifiers);
-            return;
-        }
-
-        let source = source_text(self.model.db(), self.model.file());
-        let source_slice = &source[range];
-        let bytes = source_slice.as_bytes();
-
-        let mut pos = TextSize::new(0);
-        let mut prev_backslash: Option<usize> = None;
-
-        for i in memchr_iter(b'\\', bytes) {
-            // If the previous character was also a backslash, this is an escaped backslash
-            // The escape sequence was already handled, so skip this one
-            if prev_backslash == Some(i - 1) {
-                prev_backslash = None;
-                continue;
-            }
-
-            prev_backslash = Some(i);
-
-            // Calculate the length of this escape sequence
-            let escape_len = Self::escape_sequence_len(&source_slice[i..], flags);
-            if escape_len == 0 {
-                // Not a valid escape sequence, continue
-                continue;
-            }
-
-            let backslash_pos = TextSize::new(i as u32);
-
-            // Emit token for text before the escape sequence (if any)
-            if backslash_pos > pos {
-                self.add_token(
-                    TextRange::new(range.start() + pos, range.start() + backslash_pos),
-                    SemanticTokenType::String,
-                    modifiers,
-                );
-            }
-
-            // Emit token for the escape sequence
-            let escape_end = backslash_pos + TextSize::new(escape_len as u32);
-            self.add_token(
-                TextRange::new(range.start() + backslash_pos, range.start() + escape_end),
-                SemanticTokenType::EscapeSequence,
-                modifiers,
-            );
-
-            pos = escape_end;
-        }
-
-        // Emit token for remaining text after the last escape sequence
-        if pos < range.len() {
-            self.add_token(
-                TextRange::new(range.start() + pos, range.end()),
-                SemanticTokenType::String,
-                modifiers,
-            );
-        }
-    }
-
-    /// Returns the length of an escape sequence starting at the given position,
-    /// or 0 if it's not a valid escape sequence.
-    fn escape_sequence_len(source: &str, flags: AnyStringFlags) -> usize {
-        let bytes = source.as_bytes();
-
-        // Must start with backslash
-        if bytes.first() != Some(&b'\\') {
-            return 0;
-        }
-
-        // Need at least one character after backslash
-        if bytes.len() < 2 {
-            return 0;
-        }
-
-        match bytes[1] {
-            // Simple escape sequences (2 chars total)
-            b'\\' | b'\'' | b'"' | b'a' | b'b' | b'f' | b'n' | b'r' | b't' | b'v' => 2,
-
-            // Line continuation (backslash followed by newline)
-            b'\n' => 2,
-            b'\r' => {
-                // Handle \r\n
-                if bytes.get(2) == Some(&b'\n') {
-                    3
-                } else {
-                    2
-                }
-            }
-
-            // Octal escape sequences: \0-\7 followed by up to 2 more octal digits
-            b'0'..=b'7' => {
-                let mut len = 2;
-                if bytes.get(2).is_some_and(|&b| b.is_ascii_digit() && b < b'8') {
-                    len = 3;
-                    if bytes.get(3).is_some_and(|&b| b.is_ascii_digit() && b < b'8') {
-                        len = 4;
-                    }
-                }
-                len
-            }
-
-            // Hex escape sequence: \xHH
-            b'x' => {
-                if bytes.get(2).is_some_and(|b| b.is_ascii_hexdigit())
-                    && bytes.get(3).is_some_and(|b| b.is_ascii_hexdigit())
-                {
-                    4
-                } else {
-                    // Invalid hex escape, but we'll still highlight the \x part
-                    0
-                }
-            }
-
-            // Unicode escape sequences (only in string literals, not bytes)
-            b'N' if !flags.is_byte_string() => {
-                // \N{name} - Unicode name
-                if bytes.get(2) == Some(&b'{') {
-                    // Find the closing brace
-                    if let Some(close_pos) = source[3..].find('}') {
-                        close_pos + 4 // \N{ + name + }
-                    } else {
-                        0
-                    }
-                } else {
-                    0
-                }
-            }
-
-            b'u' if !flags.is_byte_string() => {
-                // \uHHHH - 4 hex digits
-                if bytes.len() >= 6
-                    && bytes[2..6].iter().all(|b| b.is_ascii_hexdigit())
-                {
-                    6
-                } else {
-                    0
-                }
-            }
-
-            b'U' if !flags.is_byte_string() => {
-                // \UHHHHHHHH - 8 hex digits
-                if bytes.len() >= 10
-                    && bytes[2..10].iter().all(|b| b.is_ascii_hexdigit())
-                {
-                    10
-                } else {
-                    0
-                }
-            }
-
-            _ => 0,
-        }
     }
 
     fn is_constant_name(name: &str) -> bool {
@@ -1099,62 +925,32 @@ impl SourceOrderVisitor<'_> for SemanticTokenVisitor<'_> {
     }
 
     fn visit_string_literal(&mut self, string_literal: &StringLiteral) {
-        // Emit semantic tokens for this string literal part, highlighting escape sequences
-        let modifiers = if self.in_docstring {
-            SemanticTokenModifier::DOCUMENTATION
-        } else {
-            SemanticTokenModifier::empty()
-        };
-        self.add_string_tokens_with_escapes(
-            string_literal.range(),
-            string_literal.flags.into(),
-            modifiers,
-        );
+        // Only emit semantic tokens for docstrings; regular strings are handled by TextMate grammar
+        if self.in_docstring {
+            self.add_token(
+                string_literal.range(),
+                SemanticTokenType::String,
+                SemanticTokenModifier::DOCUMENTATION,
+            );
+        }
     }
 
-    fn visit_bytes_literal(&mut self, bytes_literal: &BytesLiteral) {
-        // Emit semantic tokens for this bytes literal part, highlighting escape sequences
-        self.add_string_tokens_with_escapes(
-            bytes_literal.range(),
-            bytes_literal.flags.into(),
-            SemanticTokenModifier::empty(),
-        );
+    fn visit_bytes_literal(&mut self, _bytes_literal: &BytesLiteral) {
+        // Bytes literals are handled by TextMate grammar, no semantic token needed
     }
 
     fn visit_f_string(&mut self, f_string: &FString) {
-        let flags: AnyStringFlags = f_string.flags.into();
-
-        // F-strings contain elements that can be literal strings or expressions
+        // F-string literals are handled by TextMate grammar; only visit expressions
         for element in &f_string.elements {
-            match element {
-                InterpolatedStringElement::Literal(literal_element) => {
-                    // This is a literal string part within the f-string
-                    self.add_string_tokens_with_escapes(
-                        literal_element.range(),
-                        flags,
-                        SemanticTokenModifier::empty(),
-                    );
-                }
-                InterpolatedStringElement::Interpolation(expr_element) => {
-                    // This is an expression within the f-string - visit it normally
-                    self.visit_expr(&expr_element.expression);
+            if let InterpolatedStringElement::Interpolation(expr_element) = element {
+                self.visit_expr(&expr_element.expression);
 
-                    // Handle format spec if present
-                    if let Some(format_spec) = &expr_element.format_spec {
-                        // Format specs can contain their own interpolated elements
-                        for spec_element in &format_spec.elements {
-                            match spec_element {
-                                InterpolatedStringElement::Literal(literal) => {
-                                    self.add_string_tokens_with_escapes(
-                                        literal.range(),
-                                        flags,
-                                        SemanticTokenModifier::empty(),
-                                    );
-                                }
-                                InterpolatedStringElement::Interpolation(nested_expr) => {
-                                    self.visit_expr(&nested_expr.expression);
-                                }
-                            }
+                // Handle format spec if present (may contain nested expressions)
+                if let Some(format_spec) = &expr_element.format_spec {
+                    for spec_element in &format_spec.elements {
+                        if let InterpolatedStringElement::Interpolation(nested_expr) = spec_element
+                        {
+                            self.visit_expr(&nested_expr.expression);
                         }
                     }
                 }
@@ -1163,39 +959,17 @@ impl SourceOrderVisitor<'_> for SemanticTokenVisitor<'_> {
     }
 
     fn visit_t_string(&mut self, t_string: &TString) {
-        let flags: AnyStringFlags = t_string.flags.into();
-
-        // T-strings contain elements that can be literal strings or expressions
+        // T-string literals are handled by TextMate grammar; only visit expressions
         for element in &t_string.elements {
-            match element {
-                InterpolatedStringElement::Literal(literal_element) => {
-                    // This is a literal string part within the t-string
-                    self.add_string_tokens_with_escapes(
-                        literal_element.range(),
-                        flags,
-                        SemanticTokenModifier::empty(),
-                    );
-                }
-                InterpolatedStringElement::Interpolation(expr_element) => {
-                    // This is an expression within the t-string - visit it normally
-                    self.visit_expr(&expr_element.expression);
+            if let InterpolatedStringElement::Interpolation(expr_element) = element {
+                self.visit_expr(&expr_element.expression);
 
-                    // Handle format spec if present
-                    if let Some(format_spec) = &expr_element.format_spec {
-                        // Format specs can contain their own interpolated elements
-                        for spec_element in &format_spec.elements {
-                            match spec_element {
-                                InterpolatedStringElement::Literal(literal) => {
-                                    self.add_string_tokens_with_escapes(
-                                        literal.range(),
-                                        flags,
-                                        SemanticTokenModifier::empty(),
-                                    );
-                                }
-                                InterpolatedStringElement::Interpolation(nested_expr) => {
-                                    self.visit_expr(&nested_expr.expression);
-                                }
-                            }
+                // Handle format spec if present (may contain nested expressions)
+                if let Some(format_spec) = &expr_element.format_spec {
+                    for spec_element in &format_spec.elements {
+                        if let InterpolatedStringElement::Interpolation(nested_expr) = spec_element
+                        {
+                            self.visit_expr(&nested_expr.expression);
                         }
                     }
                 }
@@ -1402,7 +1176,6 @@ y = 'hello'
         "x" @ 1..2: Variable [definition]
         "42" @ 5..7: Number
         "y" @ 8..9: Variable [definition]
-        "'hello'" @ 12..19: String
         "#);
     }
 
@@ -1421,7 +1194,6 @@ if x := 42:
         "x" @ 4..5: Variable [definition]
         "42" @ 9..11: Number
         "y" @ 17..18: Variable [definition]
-        "'hello'" @ 21..28: String
         "#);
     }
 
@@ -1720,7 +1492,6 @@ def function2():
         "x" @ 40..41: Variable
         "function2" @ 47..56: Function [definition]
         "y" @ 64..65: Variable [definition]
-        "\"hello\"" @ 68..75: String
         "z" @ 80..81: Variable [definition]
         "True" @ 84..88: BuiltinConstant
         "y" @ 100..101: Variable
@@ -1730,7 +1501,6 @@ def function2():
         assert_snapshot!(test.to_snapshot(&range_tokens), @r#"
         "function2" @ 47..56: Function [definition]
         "y" @ 64..65: Variable [definition]
-        "\"hello\"" @ 68..75: String
         "z" @ 80..81: Variable [definition]
         "True" @ 84..88: BuiltinConstant
         "y" @ 100..101: Variable
@@ -1884,18 +1654,13 @@ w5: "float
         "int" @ 16..19: Class
         "1" @ 23..24: Number
         "z" @ 25..26: Variable [definition]
-        "\"int\"" @ 29..34: String
         "w1" @ 35..37: Variable [definition]
         "int" @ 40..43: Class
         "str" @ 46..49: Class
-        "\"hello\"" @ 53..60: String
         "w2" @ 61..63: Variable [definition]
         "int" @ 66..69: Class
         "sr" @ 72..74: Variable
-        "\"hello\"" @ 78..85: String
         "w3" @ 86..88: Variable [definition]
-        "\"int | \"" @ 90..98: String
-        "\"hello\"" @ 101..108: String
         "w4" @ 109..111: Variable [definition]
         "float" @ 114..119: Class
         "w5" @ 121..123: Variable [definition]
@@ -1948,7 +1713,6 @@ u = List.__name__        # __name__ should be variable
         "42" @ 113..115: Number
         "method" @ 125..131: Method [definition]
         "self" @ 132..136: SelfParameter [definition]
-        "\"hello\"" @ 154..161: String
         "property" @ 168..176: Decorator
         "prop" @ 185..189: Method [definition]
         "self" @ 190..194: SelfParameter [definition]
@@ -1996,7 +1760,6 @@ y = obj.unknown_attr     # Should fall back to variable
         assert_snapshot!(test.to_snapshot(&tokens), @r#"
         "MyClass" @ 7..14: Class [definition]
         "some_attr" @ 20..29: Variable [definition]
-        "\"value\"" @ 32..39: String
         "obj" @ 41..44: Variable [definition]
         "MyClass" @ 47..54: Class
         "x" @ 117..118: Variable [definition]
@@ -2129,9 +1892,7 @@ def my_function(param1: int, param2: str) -> bool:
         "bool" @ 46..50: Class
         "\"\"\"Example function\n\n    Args:\n        param1: The first parameter.\n        param2: The second parameter.\n\n    Returns:\n        The return value. True for success, False otherwise.\n\n    \"\"\"" @ 56..245: String [documentation]
         "x" @ 251..252: Variable [definition]
-        "\"hello\"" @ 255..262: String
         "other_func" @ 271..281: Function [definition]
-        "\"\"\"unrelated string\"\"\"" @ 295..317: String
         "False" @ 330..335: BuiltinConstant
         "#);
     }
@@ -2149,7 +1910,7 @@ class MyClass:
     def __init__(self): pass
 
     """unrelated string"""
-    
+
     x: str = "hello"
 "#,
         );
@@ -2161,10 +1922,8 @@ class MyClass:
         "\"\"\"Example class\n\n    What a good class wowwee\n    \"\"\"" @ 20..74: String [documentation]
         "__init__" @ 84..92: Method [definition]
         "self" @ 93..97: SelfParameter [definition]
-        "\"\"\"unrelated string\"\"\"" @ 110..132: String
         "x" @ 138..139: Variable [definition]
         "str" @ 141..144: Class
-        "\"hello\"" @ 147..154: String
         "#);
     }
 
@@ -2180,7 +1939,7 @@ What a good module wooo
 def my_func(): pass
 
 """unrelated string"""
-    
+
 x: str = "hello"
 "#,
         );
@@ -2190,10 +1949,8 @@ x: str = "hello"
         assert_snapshot!(test.to_snapshot(&tokens), @r#"
         "\"\"\"Example module\n\nWhat a good module wooo\n\"\"\"" @ 1..47: String [documentation]
         "my_func" @ 53..60: Function [definition]
-        "\"\"\"unrelated string\"\"\"" @ 70..92: String
         "x" @ 94..95: Variable [definition]
         "str" @ 97..100: Class
-        "\"hello\"" @ 103..110: String
         "#);
     }
 
@@ -2222,10 +1979,8 @@ Trust me
         assert_snapshot!(test.to_snapshot(&tokens), @r#"
         "important_value" @ 1..16: Variable [definition]
         "str" @ 18..21: Class
-        "\"wow\"" @ 24..29: String
         "\"\"\"This is the most important value\n\nDon't trust the other guy\n\"\"\"" @ 30..96: String [documentation]
         "x" @ 98..99: Variable [definition]
-        "\"unrelated string\"" @ 102..120: String
         "other_value" @ 122..133: Variable [definition]
         "int" @ 135..138: Class
         "2" @ 141..142: Number
@@ -2251,7 +2006,6 @@ if True:
         "x" @ 14..15: Variable [definition]
         "1" @ 18..19: Number
         "\"this shouldn't be a docstring but also it doesn't matter much\"" @ 20..83: String [documentation]
-        "\"\"\"\n" @ 84..88: String
         "#);
     }
 
@@ -2395,14 +2149,11 @@ x = 1
         assert_snapshot!(test.to_snapshot(&tokens), @r#"
         "MyClass" @ 7..14: Class [definition]
         "\"\"\"wow cool docs\"\"\"" @ 20..39: String [documentation]
-        "\"\"\"and docs\"\"\"" @ 91..105: String
         "my_func" @ 111..118: Function [definition]
         "\"\"\"wow cool docs\"\"\"" @ 126..145: String [documentation]
-        "\"\"\"and docs\"\"\"" @ 197..211: String
         "x" @ 213..214: Variable [definition]
         "1" @ 217..218: Number
         "\"\"\"wow cool docs\"\"\"" @ 219..238: String [documentation]
-        "\"\"\"and docs\"\"\"" @ 282..296: String
         "#);
     }
 
@@ -2429,14 +2180,11 @@ x = 1
         assert_snapshot!(test.to_snapshot(&tokens), @r#"
         "MyClass" @ 7..14: Class [definition]
         "\"\"\"wow cool docs\"\"\"" @ 20..39: String [documentation]
-        "\"\"\"and docs\"\"\"" @ 60..74: String
         "my_func" @ 114..121: Function [definition]
         "\"\"\"wow cool docs\"\"\"" @ 129..148: String [documentation]
-        "\"\"\"and docs\"\"\"" @ 169..183: String
         "x" @ 219..220: Variable [definition]
         "1" @ 223..224: Number
         "\"\"\"wow cool docs\"\"\"" @ 225..244: String [documentation]
-        "\"\"\"and docs\"\"\"" @ 261..275: String
         "#);
     }
 
@@ -2493,15 +2241,9 @@ x = 1
 
         assert_snapshot!(test.to_snapshot(&tokens), @r#"
         "MyClass" @ 7..14: Class [definition]
-        "\"wow cool docs\"" @ 20..35: String
-        "\"and docs\"" @ 38..48: String
         "my_func" @ 54..61: Function [definition]
-        "\"wow cool docs\"" @ 69..84: String
-        "\"and docs\"" @ 87..97: String
         "x" @ 99..100: Variable [definition]
         "1" @ 103..104: Number
-        "\"wow cool docs\"" @ 105..120: String
-        "\"and docs\"" @ 123..133: String
         "#);
     }
 
@@ -2532,10 +2274,8 @@ class MyClass:
         "MyClass" @ 7..14: Class [definition]
         "important_value" @ 20..35: Variable [definition]
         "str" @ 37..40: Class
-        "\"wow\"" @ 43..48: String
         "\"\"\"This is the most important value\n\n    Don't trust the other guy\n    \"\"\"" @ 53..127: String [documentation]
         "x" @ 133..134: Variable [definition]
-        "\"unrelated string\"" @ 137..155: String
         "other_value" @ 161..172: Variable [definition]
         "int" @ 174..177: Class
         "2" @ 180..181: Number
@@ -2626,7 +2366,6 @@ def test_function(param: int, other: MyClass) -> Optional[List[str]]:
         "z" @ 233..234: Variable [definition]
         "List" @ 236..240: Variable
         "str" @ 241..244: Class
-        "\"hello\"" @ 249..256: String
         "None" @ 357..361: BuiltinConstant
         "#);
     }
@@ -2924,7 +2663,6 @@ class MyClass:
         "property" @ 16..24: Decorator
         "app" @ 26..29: Variable
         "route" @ 30..35: Variable
-        "\"/path\"" @ 36..43: String
         "my_function" @ 49..60: Function [definition]
         "dataclass" @ 75..84: Decorator
         "MyClass" @ 91..98: Class [definition]
@@ -2988,16 +2726,8 @@ z = 'single' "mixed" 'quotes'"#,
 
         assert_snapshot!(test.to_snapshot(&tokens), @r#"
         "x" @ 0..1: Variable [definition]
-        "\"hello\"" @ 4..11: String
-        "\"world\"" @ 12..19: String
         "y" @ 20..21: Variable [definition]
-        "\"multi\"" @ 25..32: String
-        "\"line\"" @ 38..44: String
-        "\"string\"" @ 50..58: String
         "z" @ 60..61: Variable [definition]
-        "'single'" @ 64..72: String
-        "\"mixed\"" @ 73..80: String
-        "'quotes'" @ 81..89: String
         "#);
     }
 
@@ -3015,16 +2745,8 @@ z = b'single' b"mixed" b'quotes'"#,
 
         assert_snapshot!(test.to_snapshot(&tokens), @r#"
         "x" @ 0..1: Variable [definition]
-        "b\"hello\"" @ 4..12: String
-        "b\"world\"" @ 13..21: String
         "y" @ 22..23: Variable [definition]
-        "b\"multi\"" @ 27..35: String
-        "b\"line\"" @ 41..48: String
-        "b\"bytes\"" @ 54..62: String
         "z" @ 64..65: Variable [definition]
-        "b'single'" @ 68..77: String
-        "b\"mixed\"" @ 78..86: String
-        "b'quotes'" @ 87..96: String
         "#);
     }
 
@@ -3044,23 +2766,11 @@ regular_bytes = b"just bytes""#,
 
         assert_snapshot!(test.to_snapshot(&tokens), @r#"
         "string_concat" @ 39..52: Variable [definition]
-        "\"hello\"" @ 55..62: String
-        "\"world\"" @ 63..70: String
         "bytes_concat" @ 71..83: Variable [definition]
-        "b\"hello\"" @ 86..94: String
-        "b\"world\"" @ 95..103: String
         "mixed_quotes_str" @ 104..120: Variable [definition]
-        "'single'" @ 123..131: String
-        "\"double\"" @ 132..140: String
-        "'single'" @ 141..149: String
         "mixed_quotes_bytes" @ 150..168: Variable [definition]
-        "b'single'" @ 171..180: String
-        "b\"double\"" @ 181..190: String
-        "b'single'" @ 191..200: String
         "regular_string" @ 201..215: Variable [definition]
-        "\"just a string\"" @ 218..233: String
         "regular_bytes" @ 234..247: Variable [definition]
-        "b\"just bytes\"" @ 250..263: String
         "#);
     }
 
@@ -3088,31 +2798,20 @@ complex_fstring = f"User: {name.upper()}, Count: {len(data)}, Hex: {value:x}"
 
         assert_snapshot!(test.to_snapshot(&tokens), @r#"
         "name" @ 45..49: Variable [definition]
-        "\"Alice\"" @ 52..59: String
         "data" @ 60..64: Variable [definition]
-        "b\"hello\"" @ 67..75: String
         "value" @ 76..81: Variable [definition]
         "42" @ 84..86: Number
         "result" @ 153..159: Variable [definition]
-        "Hello " @ 164..170: String
         "name" @ 171..175: Variable
-        "! Value: " @ 176..185: String
         "value" @ 186..191: Variable
-        ", Data: " @ 192..200: String
         "data" @ 201..205: Variable
         "mixed" @ 266..271: Variable [definition]
-        "prefix" @ 276..282: String
-        "b\"suffix\"" @ 286..295: String
         "complex_fstring" @ 340..355: Variable [definition]
-        "User: " @ 360..366: String
         "name" @ 367..371: Variable
         "upper" @ 372..377: Method
-        ", Count: " @ 380..389: String
         "len" @ 390..393: Function
         "data" @ 394..398: Variable
-        ", Hex: " @ 400..407: String
         "value" @ 408..413: Variable
-        "x" @ 414..415: String
         "#);
     }
 
@@ -3149,24 +2848,17 @@ def outer():
 
         assert_snapshot!(test.to_snapshot(&tokens), @r#"
         "x" @ 1..2: Variable [definition]
-        "\"global_value\"" @ 5..19: String
         "y" @ 20..21: Variable [definition]
-        "\"another_global\"" @ 24..40: String
         "outer" @ 46..51: Function [definition]
         "x" @ 59..60: Variable [definition]
-        "\"outer_value\"" @ 63..76: String
         "z" @ 81..82: Variable [definition]
-        "\"outer_local\"" @ 85..98: String
         "inner" @ 108..113: Function [definition]
         "x" @ 134..135: Variable
         "z" @ 137..138: Variable
         "y" @ 189..190: Variable
         "x" @ 239..240: Variable [definition]
-        "\"modified\"" @ 243..253: String
         "y" @ 262..263: Variable [definition]
-        "\"modified_global\"" @ 266..283: String
         "z" @ 292..293: Variable [definition]
-        "\"modified_local\"" @ 296..312: String
         "deeper" @ 326..332: Function [definition]
         "x" @ 357..358: Variable
         "y" @ 398..399: Variable
@@ -3242,33 +2934,25 @@ def process_data(data):
         "process_data" @ 5..17: Function [definition]
         "data" @ 18..22: Parameter [definition]
         "data" @ 35..39: Parameter
-        "\"name\"" @ 55..61: String
         "name" @ 63..67: Variable
-        "\"age\"" @ 69..74: String
         "age" @ 76..79: Variable
         "rest" @ 83..87: Variable
         "person" @ 92..98: Variable
         "print" @ 112..117: Function
-        "Person " @ 120..127: String
         "name" @ 128..132: Variable
-        ", age " @ 133..139: String
         "age" @ 140..143: Variable
-        ", extra: " @ 144..153: String
         "rest" @ 154..158: Variable
         "person" @ 181..187: Variable
         "first" @ 202..207: Variable
         "remaining" @ 210..219: Variable
         "sequence" @ 224..232: Variable
         "print" @ 246..251: Function
-        "First: " @ 254..261: String
         "first" @ 262..267: Variable
-        ", remaining: " @ 268..281: String
         "remaining" @ 282..291: Variable
         "sequence" @ 314..322: Variable
         "value" @ 336..341: Variable
         "fallback" @ 345..353: Variable
         "print" @ 367..372: Function
-        "Fallback: " @ 375..385: String
         "fallback" @ 386..394: Variable
         "fallback" @ 417..425: Variable
         "#);
@@ -3421,7 +3105,6 @@ with open("file.txt") as f:
 
         assert_snapshot!(test.to_snapshot(&tokens), @r#"
         "open" @ 6..10: Function
-        "\"file.txt\"" @ 11..21: String
         "f" @ 26..27: Variable [definition]
         "f" @ 33..34: Variable
         "read" @ 35..39: Method
@@ -3460,8 +3143,6 @@ generator = (x for x in range(10))
         "k" @ 106..107: Variable [definition]
         "v" @ 109..110: Variable [definition]
         "zip" @ 114..117: Class
-        "\"a\"" @ 119..122: String
-        "\"b\"" @ 124..127: String
         "1" @ 131..132: Number
         "2" @ 134..135: Number
         "generator" @ 139..148: Variable [definition]
@@ -3588,229 +3269,5 @@ def foo(self, **key, value=10):
 
             result
         }
-    }
-
-    #[test]
-    fn escape_sequences_simple() {
-        let test = SemanticTokenTest::new(r#"x = "hello\nworld\t!""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "x" @ 0..1: Variable [definition]
-        "\"hello" @ 4..10: String
-        "\\n" @ 10..12: EscapeSequence
-        "world" @ 12..17: String
-        "\\t" @ 17..19: EscapeSequence
-        "!\"" @ 19..21: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_backslash() {
-        let test = SemanticTokenTest::new(r#"x = "path\\to\\file""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "x" @ 0..1: Variable [definition]
-        "\"path" @ 4..9: String
-        "\\\\" @ 9..11: EscapeSequence
-        "to" @ 11..13: String
-        "\\\\" @ 13..15: EscapeSequence
-        "file\"" @ 15..20: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_hex() {
-        let test = SemanticTokenTest::new(r#"x = "hello\x00world""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "x" @ 0..1: Variable [definition]
-        "\"hello" @ 4..10: String
-        "\\x00" @ 10..14: EscapeSequence
-        "world\"" @ 14..20: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_unicode() {
-        let test = SemanticTokenTest::new(r#"x = "caf\u00e9""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "x" @ 0..1: Variable [definition]
-        "\"caf" @ 4..8: String
-        "\\u00e9" @ 8..14: EscapeSequence
-        "\"" @ 14..15: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_unicode_long() {
-        let test = SemanticTokenTest::new(r#"x = "\U0001F600""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "x" @ 0..1: Variable [definition]
-        "\"" @ 4..5: String
-        "\\U0001F600" @ 5..15: EscapeSequence
-        "\"" @ 15..16: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_unicode_name() {
-        let test = SemanticTokenTest::new(r#"x = "\N{SNOWMAN}""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "x" @ 0..1: Variable [definition]
-        "\"" @ 4..5: String
-        "\\N{SNOWMAN}" @ 5..16: EscapeSequence
-        "\"" @ 16..17: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_octal() {
-        let test = SemanticTokenTest::new(r#"x = "\101\12\7""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "x" @ 0..1: Variable [definition]
-        "\"" @ 4..5: String
-        "\\101" @ 5..9: EscapeSequence
-        "\\12" @ 9..12: EscapeSequence
-        "\\7" @ 12..14: EscapeSequence
-        "\"" @ 14..15: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_raw_string() {
-        // Raw strings should NOT highlight escape sequences
-        let test = SemanticTokenTest::new(r#"x = r"hello\nworld""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "x" @ 0..1: Variable [definition]
-        "r\"hello\\nworld\"" @ 4..19: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_bytes() {
-        let test = SemanticTokenTest::new(r#"x = b"hello\nworld""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "x" @ 0..1: Variable [definition]
-        "b\"hello" @ 4..11: String
-        "\\n" @ 11..13: EscapeSequence
-        "world\"" @ 13..19: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_bytes_no_unicode() {
-        // Unicode escapes are NOT valid in byte strings
-        let test = SemanticTokenTest::new(r#"x = b"hello\u0041world""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "x" @ 0..1: Variable [definition]
-        "b\"hello\\u0041world\"" @ 4..23: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_fstring() {
-        let test = SemanticTokenTest::new(r#"x = f"hello\nworld""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "x" @ 0..1: Variable [definition]
-        "hello" @ 6..11: String
-        "\\n" @ 11..13: EscapeSequence
-        "world" @ 13..18: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_fstring_with_expr() {
-        let test = SemanticTokenTest::new(r#"name = "world"; x = f"hello\n{name}!""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "name" @ 0..4: Variable [definition]
-        "\"world\"" @ 7..14: String
-        "x" @ 16..17: Variable [definition]
-        "hello" @ 22..27: String
-        "\\n" @ 27..29: EscapeSequence
-        "name" @ 30..34: Variable
-        "!" @ 35..36: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_triple_quoted() {
-        let test = SemanticTokenTest::new(
-            r#"x = """line1\nline2\tindented""""#,
-        );
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "x" @ 0..1: Variable [definition]
-        "\"\"\"line1" @ 4..12: String
-        "\\n" @ 12..14: EscapeSequence
-        "line2" @ 14..19: String
-        "\\t" @ 19..21: EscapeSequence
-        "indented\"\"\"" @ 21..32: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_tstring() {
-        let test = SemanticTokenTest::new(r#"x = t"hello\nworld""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "x" @ 0..1: Variable [definition]
-        "hello" @ 6..11: String
-        "\\n" @ 11..13: EscapeSequence
-        "world" @ 13..18: String
-        "#);
-    }
-
-    #[test]
-    fn escape_sequences_tstring_with_expr() {
-        let test = SemanticTokenTest::new(r#"name = "world"; x = t"hello\n{name}!""#);
-
-        let tokens = test.highlight_file();
-
-        assert_snapshot!(test.to_snapshot(&tokens), @r#"
-        "name" @ 0..4: Variable [definition]
-        "\"world\"" @ 7..14: String
-        "x" @ 16..17: Variable [definition]
-        "hello" @ 22..27: String
-        "\\n" @ 27..29: EscapeSequence
-        "name" @ 30..34: Variable
-        "!" @ 35..36: String
-        "#);
     }
 }
