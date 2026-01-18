@@ -18,8 +18,8 @@ use ty_python_semantic::types::ide_support::{
     call_signature_details, call_type_simplified_by_overloads, definitions_for_keyword_argument,
 };
 use ty_python_semantic::{
-    HasDefinition, HasType, ImportAliasResolution, SemanticModel, definitions_for_imported_symbol,
-    definitions_for_name,
+    HasDefinition, HasType, ImportAliasResolution, SemanticModel,
+    definitions_for_imported_symbol, definitions_for_name,
 };
 
 #[derive(Clone, Debug)]
@@ -304,7 +304,6 @@ impl GotoTarget<'_> {
             GotoTarget::ImportSymbolAlias { alias, .. }
             | GotoTarget::ImportModuleAlias { alias, .. }
             | GotoTarget::ImportExportedName { alias, .. } => alias.inferred_type(model),
-            GotoTarget::ExceptVariable(except) => except.inferred_type(model),
             GotoTarget::KeywordArgument { keyword, .. } => keyword.value.inferred_type(model),
             // When asking the type of a callable, usually you want the callable itself?
             // (i.e. the type of `MyClass` in `MyClass()` is `<class MyClass>` and not `() -> MyClass`)
@@ -345,6 +344,9 @@ impl GotoTarget<'_> {
             GotoTarget::UnaryOp { expression, .. } => {
                 let (_, ty) = ty_python_semantic::definitions_for_unary_op(model, expression)?;
                 Some(ty)
+            }
+            GotoTarget::ExceptVariable(except_handler) => {
+                model.except_handler_type(except_handler)
             }
             // TODO: Support identifier targets
             GotoTarget::PatternMatchRest(_)
@@ -451,12 +453,10 @@ impl GotoTarget<'_> {
                 call_expression,
             )),
 
-            // For exception variables, they are their own definitions (like parameters)
-            GotoTarget::ExceptVariable(except_handler) => {
-                Some(vec![ResolvedDefinition::Definition(
-                    except_handler.definition(model),
-                )])
-            }
+            // Exception variables have their own definition (like parameters).
+            GotoTarget::ExceptVariable(except_handler) => model
+                .except_handler_definition(except_handler)
+                .map(|def| vec![ResolvedDefinition::Definition(def)]),
 
             // Patterns are glorified assignments but we have to look them up by ident
             // because they're not expressions

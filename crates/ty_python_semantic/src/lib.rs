@@ -12,7 +12,7 @@ pub use program::{Program, ProgramSettings};
 pub use python_platform::PythonPlatform;
 use rustc_hash::FxHasher;
 pub use semantic_model::{
-    Completion, HasDefinition, HasType, MemberDefinition, NameKind, SemanticModel,
+    Completion, HasDefinition, HasType, MemberDefinition, NameKind, SemanticModel, TryDefinition,
 };
 pub use suppression::{UNUSED_IGNORE_COMMENT, suppress_all, suppress_single};
 pub use ty_module_resolver::MisconfigurationMode;

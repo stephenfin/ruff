@@ -4194,6 +4194,73 @@ def function():
         ");
     }
 
+    /// Regression test for <https://github.com/astral-sh/ty/issues/2401>
+    ///
+    /// Hovering over an incomplete except block without a name should not panic.
+    #[test]
+    fn hover_incomplete_except_block() {
+        let test = cursor_test(
+            r#"
+        try:
+            print()
+        except<CURSOR>
+        "#,
+        );
+
+        assert_snapshot!(test.hover(), @"Hover provided no content");
+    }
+
+    /// Regression test for <https://github.com/astral-sh/ty/issues/2401>
+    ///
+    /// Hovering over an except block without a name binding should not panic.
+    #[test]
+    fn hover_except_block_without_name() {
+        let test = cursor_test(
+            r#"
+        try:
+            print()
+        except<CURSOR> Exception:
+            pass
+        "#,
+        );
+
+        assert_snapshot!(test.hover(), @"Hover provided no content");
+    }
+
+    /// Test that hovering on a valid except block with a name still works.
+    #[test]
+    fn hover_except_block_with_name() {
+        let test = cursor_test(
+            r#"
+        try:
+            print()
+        except Exception as <CURSOR>e:
+            pass
+        "#,
+        );
+
+        assert_snapshot!(test.hover(), @r"
+        Exception
+        ---------------------------------------------
+        ```python
+        Exception
+        ```
+        ---------------------------------------------
+        info[hover]: Hovered content is
+         --> main.py:4:21
+          |
+        2 | try:
+        3 |     print()
+        4 | except Exception as e:
+          |                     -
+          |                     |
+          |                     source
+          |                     Cursor offset
+        5 |     pass
+          |
+        ");
+    }
+
     impl CursorTest {
         fn hover(&self) -> String {
             use std::fmt::Write;

@@ -861,6 +861,7 @@ mod resolve_definition {
     use crate::semantic_index::definition::{Definition, DefinitionKind, module_docstring};
     use crate::semantic_index::scope::{NodeWithScopeKind, ScopeId};
     use crate::semantic_index::{global_scope, place_table, semantic_index, use_def_map};
+    use crate::types::{Type, binding_type};
 
     /// Represents the result of resolving an import to either a specific definition or
     /// a specific range within a file.
@@ -899,6 +900,14 @@ mod resolve_definition {
                 ResolvedDefinition::Definition(definition) => definition.docstring(db),
                 ResolvedDefinition::Module(file) => module_docstring(db, *file),
                 ResolvedDefinition::FileWithRange(_) => None,
+            }
+        }
+
+        /// Returns the binding type for this resolved definition, if it has one.
+        pub fn binding_type(&self, db: &'db dyn Db) -> Option<Type<'db>> {
+            match self {
+                ResolvedDefinition::Definition(definition) => Some(binding_type(db, *definition)),
+                ResolvedDefinition::Module(_) | ResolvedDefinition::FileWithRange(_) => None,
             }
         }
     }

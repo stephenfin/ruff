@@ -2189,6 +2189,9 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                         // which is invalid syntax. However, it's still pretty obvious here that the user
                         // *wanted* `e` to be bound, so we should still create a definition here nonetheless.
                         let symbol = if let Some(symbol_name) = symbol_name {
+                            // Register the scope for the name identifier so IDE features can look it up.
+                            self.scopes_by_expression
+                                .record_expression(symbol_name, self.current_scope());
                             let symbol = self.add_symbol(symbol_name.id.clone());
 
                             self.add_definition(
