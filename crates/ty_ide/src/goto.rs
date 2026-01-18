@@ -345,17 +345,8 @@ impl GotoTarget<'_> {
                 let (_, ty) = ty_python_semantic::definitions_for_unary_op(model, expression)?;
                 Some(ty)
             }
+            GotoTarget::ExceptVariable(except_handler) => except_handler.inferred_type(model),
             // TODO: Support identifier targets
-            GotoTarget::ExceptVariable(except_handler) => {
-                let name = except_handler.name.as_ref()?;
-                let definitions = definitions_for_name(
-                    model,
-                    name.as_str(),
-                    AnyNodeRef::Identifier(name),
-                    ImportAliasResolution::ResolveAliases,
-                );
-                definitions.first()?.binding_type(model.db())
-            }
             GotoTarget::PatternMatchRest(_)
             | GotoTarget::PatternKeywordArgument(_)
             | GotoTarget::PatternMatchStarName(_)

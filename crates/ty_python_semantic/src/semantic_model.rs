@@ -587,6 +587,14 @@ impl HasType for ast::Alias {
     }
 }
 
+impl HasType for ast::ExceptHandlerExceptHandler {
+    fn inferred_type<'db>(&self, model: &SemanticModel<'db>) -> Option<Type<'db>> {
+        self.name.as_ref()?;
+        let index = semantic_index(model.db, model.file);
+        Some(binding_type(model.db, index.expect_single_definition(self)))
+    }
+}
+
 /// Implemented by types for which the semantic index tracks their scope.
 pub(crate) trait HasTrackedScope: HasNodeIndex {}
 
