@@ -346,7 +346,9 @@ impl GotoTarget<'_> {
                 Some(ty)
             }
             GotoTarget::ExceptVariable(except_handler) => {
-                model.except_handler_type(except_handler)
+                let definition =
+                    ty_python_semantic::definition_for_except_handler(model, except_handler)?;
+                ResolvedDefinition::Definition(definition).binding_type(model.db())
             }
             // TODO: Support identifier targets
             GotoTarget::PatternMatchRest(_)
@@ -454,9 +456,10 @@ impl GotoTarget<'_> {
             )),
 
             // Exception variables have their own definition (like parameters).
-            GotoTarget::ExceptVariable(except_handler) => model
-                .except_handler_definition(except_handler)
-                .map(|def| vec![ResolvedDefinition::Definition(def)]),
+            GotoTarget::ExceptVariable(except_handler) => {
+                ty_python_semantic::definition_for_except_handler(model, except_handler)
+                    .map(|def| vec![ResolvedDefinition::Definition(def)])
+            }
 
             // Patterns are glorified assignments but we have to look them up by ident
             // because they're not expressions

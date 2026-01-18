@@ -12,7 +12,7 @@ pub use program::{Program, ProgramSettings};
 pub use python_platform::PythonPlatform;
 use rustc_hash::FxHasher;
 pub use semantic_model::{
-    Completion, HasDefinition, HasType, MemberDefinition, NameKind, SemanticModel, TryDefinition,
+    Completion, HasDefinition, HasType, MemberDefinition, NameKind, SemanticModel,
 };
 pub use suppression::{UNUSED_IGNORE_COMMENT, suppress_all, suppress_single};
 pub use ty_module_resolver::MisconfigurationMode;
@@ -22,9 +22,9 @@ pub use ty_site_packages::{
 };
 pub use types::DisplaySettings;
 pub use types::ide_support::{
-    ImportAliasResolution, ResolvedDefinition, definitions_for_attribute, definitions_for_bin_op,
-    definitions_for_imported_symbol, definitions_for_name, definitions_for_unary_op,
-    map_stub_definition,
+    ImportAliasResolution, ResolvedDefinition, definition_for_except_handler,
+    definitions_for_attribute, definitions_for_bin_op, definitions_for_imported_symbol,
+    definitions_for_name, definitions_for_unary_op, map_stub_definition,
 };
 
 pub mod ast_node_ref;

@@ -447,31 +447,12 @@ pub trait HasType {
     fn inferred_type<'db>(&self, model: &SemanticModel<'db>) -> Option<Type<'db>>;
 }
 
-pub trait HasDefinition: TryDefinition {
+pub trait HasDefinition {
     /// Returns the definition of `self`.
     ///
     /// ## Panics
     /// May panic if `self` is from another file than `model`.
     fn definition<'db>(&self, model: &SemanticModel<'db>) -> Definition<'db>;
-}
-
-/// Trait for AST nodes that may or may not have a definition.
-///
-/// This is automatically implemented for types that implement [`HasDefinition`],
-/// but can also be implemented directly for types that only sometimes have a
-/// definition (e.g., `ExceptHandlerExceptHandler` without a name binding).
-pub trait TryDefinition {
-    /// Returns the definition of `self`, if one exists.
-    ///
-    /// ## Panics
-    /// May panic if `self` is from another file than `model`.
-    fn try_definition<'db>(&self, model: &SemanticModel<'db>) -> Option<Definition<'db>>;
-}
-
-impl<T: HasDefinition> TryDefinition for T {
-    fn try_definition<'db>(&self, model: &SemanticModel<'db>) -> Option<Definition<'db>> {
-        Some(self.definition(model))
-    }
 }
 
 impl HasType for ast::ExprRef<'_> {
@@ -600,33 +581,6 @@ impl_binding_has_ty_def!(ast::Parameter);
 impl_binding_has_ty_def!(ast::ParameterWithDefault);
 impl_binding_has_ty_def!(ast::TypeParamTypeVar);
 
-impl<'db> SemanticModel<'db> {
-    /// Returns the definition for an except handler's bound variable, if it has one.
-    ///
-    /// For example, `except Exception as e:` binds `e`, so this returns the definition for `e`.
-    /// For `except Exception:` or `except:`, this returns `None`.
-    pub fn except_handler_definition(
-        &self,
-        handler: &ast::ExceptHandlerExceptHandler,
-    ) -> Option<Definition<'db>> {
-        handler.name.as_ref()?;
-        let index = semantic_index(self.db, self.file);
-        Some(index.expect_single_definition(handler))
-    }
-
-    /// Returns the type of an except handler's bound variable, if it has one.
-    ///
-    /// For example, `except Exception as e:` binds `e`, so this returns the type of `e`.
-    /// For `except Exception:` or `except:`, this returns `None`.
-    pub fn except_handler_type(
-        &self,
-        handler: &ast::ExceptHandlerExceptHandler,
-    ) -> Option<Type<'db>> {
-        let definition = self.except_handler_definition(handler)?;
-        Some(binding_type(self.db, definition))
-    }
-}
-
 impl HasType for ast::Alias {
     fn inferred_type<'db>(&self, model: &SemanticModel<'db>) -> Option<Type<'db>> {
         if &self.name == "*" {
@@ -634,19 +588,6 @@ impl HasType for ast::Alias {
         }
         let index = semantic_index(model.db, model.file);
         Some(binding_type(model.db, index.expect_single_definition(self)))
-    }
-}
-
-impl TryDefinition for ast::AnyNodeRef<'_> {
-    fn try_definition<'db>(&self, model: &SemanticModel<'db>) -> Option<Definition<'db>> {
-        match self {
-            ast::AnyNodeRef::StmtFunctionDef(node) => node.try_definition(model),
-            ast::AnyNodeRef::StmtClassDef(node) => node.try_definition(model),
-            ast::AnyNodeRef::TypeParamTypeVar(node) => node.try_definition(model),
-            ast::AnyNodeRef::Parameter(node) => node.try_definition(model),
-            ast::AnyNodeRef::ParameterWithDefault(node) => node.try_definition(model),
-            _ => None,
-        }
     }
 }
 

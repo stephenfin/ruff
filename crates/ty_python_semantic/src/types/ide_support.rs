@@ -41,6 +41,19 @@ pub fn definition_for_name<'db>(
     None
 }
 
+/// Get the definition for an except handler's bound variable.
+///
+/// For example, `except Exception as e:` binds `e`, so this returns the definition for `e`.
+/// Returns `None` if the handler has no name binding (e.g., `except:` or `except Exception:`).
+pub fn definition_for_except_handler<'db>(
+    model: &SemanticModel<'db>,
+    handler: &ast::ExceptHandlerExceptHandler,
+) -> Option<Definition<'db>> {
+    handler.name.as_ref()?;
+    let index = semantic_index(model.db(), model.file());
+    Some(index.expect_single_definition(handler))
+}
+
 /// Returns all definitions for a name. If any definitions are imports, they
 /// are resolved (recursively) to the original definitions or module files.
 pub fn definitions_for_name<'db>(
