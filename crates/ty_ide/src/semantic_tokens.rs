@@ -32,14 +32,16 @@
 use crate::Db;
 use bitflags::bitflags;
 use itertools::Itertools;
+use memchr::memchr_iter;
 use ruff_db::files::File;
 use ruff_db::parsed::parsed_module;
+use ruff_db::source::source_text;
 use ruff_python_ast::visitor::source_order::{
     SourceOrderVisitor, TraversalSignal, walk_arguments, walk_expr, walk_stmt,
 };
 use ruff_python_ast::{
-    self as ast, AnyNodeRef, BytesLiteral, Expr, FString, InterpolatedStringElement, Stmt,
-    StringLiteral, TypeParam,
+    self as ast, AnyNodeRef, AnyStringFlags, BytesLiteral, Expr, FString,
+    InterpolatedStringElement, Stmt, StringLiteral, TString, TypeParam,
 };
 use ruff_text_size::{Ranged, TextLen, TextRange, TextSize};
 use std::ops::Deref;
@@ -69,11 +71,12 @@ pub enum SemanticTokenType {
     Decorator,
     BuiltinConstant,
     TypeParameter,
+    EscapeSequence,
 }
 
 impl SemanticTokenType {
     /// Returns all supported semantic token types as enum variants.
-    pub const fn all() -> [SemanticTokenType; 15] {
+    pub const fn all() -> [SemanticTokenType; 16] {
         [
             SemanticTokenType::Namespace,
             SemanticTokenType::Class,
@@ -90,6 +93,7 @@ impl SemanticTokenType {
             SemanticTokenType::Decorator,
             SemanticTokenType::BuiltinConstant,
             SemanticTokenType::TypeParameter,
+            SemanticTokenType::EscapeSequence,
         ]
     }
 
@@ -117,6 +121,7 @@ impl SemanticTokenType {
             SemanticTokenType::Decorator => "decorator",
             SemanticTokenType::BuiltinConstant => "builtinConstant",
             SemanticTokenType::TypeParameter => "typeParameter",
+            SemanticTokenType::EscapeSequence => "escapeSequence",
         }
     }
 }
@@ -259,6 +264,175 @@ impl<'db> SemanticTokenVisitor<'db> {
             token_type,
             modifiers,
         });
+    }
+
+    /// Add string tokens with escape sequence highlighting.
+    ///
+    /// This method scans the source text in the given range for escape sequences
+    /// and emits separate tokens for regular string content and escape sequences.
+    /// Raw strings (with r/R prefix) don't have escape sequences, so they are
+    /// emitted as a single String token.
+    fn add_string_tokens_with_escapes(
+        &mut self,
+        range: TextRange,
+        flags: AnyStringFlags,
+        modifiers: SemanticTokenModifier,
+    ) {
+        // Raw strings don't have escape sequences
+        if flags.is_raw_string() {
+            self.add_token(range, SemanticTokenType::String, modifiers);
+            return;
+        }
+
+        let source = source_text(self.model.db(), self.model.file());
+        let source_slice = &source[range];
+        let bytes = source_slice.as_bytes();
+
+        let mut pos = TextSize::new(0);
+        let mut prev_backslash: Option<usize> = None;
+
+        for i in memchr_iter(b'\\', bytes) {
+            // If the previous character was also a backslash, this is an escaped backslash
+            // The escape sequence was already handled, so skip this one
+            if prev_backslash == Some(i - 1) {
+                prev_backslash = None;
+                continue;
+            }
+
+            prev_backslash = Some(i);
+
+            // Calculate the length of this escape sequence
+            let escape_len = Self::escape_sequence_len(&source_slice[i..], flags);
+            if escape_len == 0 {
+                // Not a valid escape sequence, continue
+                continue;
+            }
+
+            let backslash_pos = TextSize::new(i as u32);
+
+            // Emit token for text before the escape sequence (if any)
+            if backslash_pos > pos {
+                self.add_token(
+                    TextRange::new(range.start() + pos, range.start() + backslash_pos),
+                    SemanticTokenType::String,
+                    modifiers,
+                );
+            }
+
+            // Emit token for the escape sequence
+            let escape_end = backslash_pos + TextSize::new(escape_len as u32);
+            self.add_token(
+                TextRange::new(range.start() + backslash_pos, range.start() + escape_end),
+                SemanticTokenType::EscapeSequence,
+                modifiers,
+            );
+
+            pos = escape_end;
+        }
+
+        // Emit token for remaining text after the last escape sequence
+        if pos < range.len() {
+            self.add_token(
+                TextRange::new(range.start() + pos, range.end()),
+                SemanticTokenType::String,
+                modifiers,
+            );
+        }
+    }
+
+    /// Returns the length of an escape sequence starting at the given position,
+    /// or 0 if it's not a valid escape sequence.
+    fn escape_sequence_len(source: &str, flags: AnyStringFlags) -> usize {
+        let bytes = source.as_bytes();
+
+        // Must start with backslash
+        if bytes.first() != Some(&b'\\') {
+            return 0;
+        }
+
+        // Need at least one character after backslash
+        if bytes.len() < 2 {
+            return 0;
+        }
+
+        match bytes[1] {
+            // Simple escape sequences (2 chars total)
+            b'\\' | b'\'' | b'"' | b'a' | b'b' | b'f' | b'n' | b'r' | b't' | b'v' => 2,
+
+            // Line continuation (backslash followed by newline)
+            b'\n' => 2,
+            b'\r' => {
+                // Handle \r\n
+                if bytes.get(2) == Some(&b'\n') {
+                    3
+                } else {
+                    2
+                }
+            }
+
+            // Octal escape sequences: \0-\7 followed by up to 2 more octal digits
+            b'0'..=b'7' => {
+                let mut len = 2;
+                if bytes.get(2).is_some_and(|&b| b.is_ascii_digit() && b < b'8') {
+                    len = 3;
+                    if bytes.get(3).is_some_and(|&b| b.is_ascii_digit() && b < b'8') {
+                        len = 4;
+                    }
+                }
+                len
+            }
+
+            // Hex escape sequence: \xHH
+            b'x' => {
+                if bytes.get(2).is_some_and(|b| b.is_ascii_hexdigit())
+                    && bytes.get(3).is_some_and(|b| b.is_ascii_hexdigit())
+                {
+                    4
+                } else {
+                    // Invalid hex escape, but we'll still highlight the \x part
+                    0
+                }
+            }
+
+            // Unicode escape sequences (only in string literals, not bytes)
+            b'N' if !flags.is_byte_string() => {
+                // \N{name} - Unicode name
+                if bytes.get(2) == Some(&b'{') {
+                    // Find the closing brace
+                    if let Some(close_pos) = source[3..].find('}') {
+                        close_pos + 4 // \N{ + name + }
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+
+            b'u' if !flags.is_byte_string() => {
+                // \uHHHH - 4 hex digits
+                if bytes.len() >= 6
+                    && bytes[2..6].iter().all(|b| b.is_ascii_hexdigit())
+                {
+                    6
+                } else {
+                    0
+                }
+            }
+
+            b'U' if !flags.is_byte_string() => {
+                // \UHHHHHHHH - 8 hex digits
+                if bytes.len() >= 10
+                    && bytes[2..10].iter().all(|b| b.is_ascii_hexdigit())
+                {
+                    10
+                } else {
+                    0
+                }
+            }
+
+            _ => 0,
+        }
     }
 
     fn is_constant_name(name: &str) -> bool {
@@ -925,33 +1099,39 @@ impl SourceOrderVisitor<'_> for SemanticTokenVisitor<'_> {
     }
 
     fn visit_string_literal(&mut self, string_literal: &StringLiteral) {
-        // Emit a semantic token for this string literal part
+        // Emit semantic tokens for this string literal part, highlighting escape sequences
         let modifiers = if self.in_docstring {
             SemanticTokenModifier::DOCUMENTATION
         } else {
             SemanticTokenModifier::empty()
         };
-        self.add_token(string_literal.range(), SemanticTokenType::String, modifiers);
+        self.add_string_tokens_with_escapes(
+            string_literal.range(),
+            string_literal.flags.into(),
+            modifiers,
+        );
     }
 
     fn visit_bytes_literal(&mut self, bytes_literal: &BytesLiteral) {
-        // Emit a semantic token for this bytes literal part
-        self.add_token(
+        // Emit semantic tokens for this bytes literal part, highlighting escape sequences
+        self.add_string_tokens_with_escapes(
             bytes_literal.range(),
-            SemanticTokenType::String,
+            bytes_literal.flags.into(),
             SemanticTokenModifier::empty(),
         );
     }
 
     fn visit_f_string(&mut self, f_string: &FString) {
+        let flags: AnyStringFlags = f_string.flags.into();
+
         // F-strings contain elements that can be literal strings or expressions
         for element in &f_string.elements {
             match element {
                 InterpolatedStringElement::Literal(literal_element) => {
                     // This is a literal string part within the f-string
-                    self.add_token(
+                    self.add_string_tokens_with_escapes(
                         literal_element.range(),
-                        SemanticTokenType::String,
+                        flags,
                         SemanticTokenModifier::empty(),
                     );
                 }
@@ -965,9 +1145,50 @@ impl SourceOrderVisitor<'_> for SemanticTokenVisitor<'_> {
                         for spec_element in &format_spec.elements {
                             match spec_element {
                                 InterpolatedStringElement::Literal(literal) => {
-                                    self.add_token(
+                                    self.add_string_tokens_with_escapes(
                                         literal.range(),
-                                        SemanticTokenType::String,
+                                        flags,
+                                        SemanticTokenModifier::empty(),
+                                    );
+                                }
+                                InterpolatedStringElement::Interpolation(nested_expr) => {
+                                    self.visit_expr(&nested_expr.expression);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn visit_t_string(&mut self, t_string: &TString) {
+        let flags: AnyStringFlags = t_string.flags.into();
+
+        // T-strings contain elements that can be literal strings or expressions
+        for element in &t_string.elements {
+            match element {
+                InterpolatedStringElement::Literal(literal_element) => {
+                    // This is a literal string part within the t-string
+                    self.add_string_tokens_with_escapes(
+                        literal_element.range(),
+                        flags,
+                        SemanticTokenModifier::empty(),
+                    );
+                }
+                InterpolatedStringElement::Interpolation(expr_element) => {
+                    // This is an expression within the t-string - visit it normally
+                    self.visit_expr(&expr_element.expression);
+
+                    // Handle format spec if present
+                    if let Some(format_spec) = &expr_element.format_spec {
+                        // Format specs can contain their own interpolated elements
+                        for spec_element in &format_spec.elements {
+                            match spec_element {
+                                InterpolatedStringElement::Literal(literal) => {
+                                    self.add_string_tokens_with_escapes(
+                                        literal.range(),
+                                        flags,
                                         SemanticTokenModifier::empty(),
                                     );
                                 }
@@ -3367,5 +3588,229 @@ def foo(self, **key, value=10):
 
             result
         }
+    }
+
+    #[test]
+    fn escape_sequences_simple() {
+        let test = SemanticTokenTest::new(r#"x = "hello\nworld\t!""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "x" @ 0..1: Variable [definition]
+        "\"hello" @ 4..10: String
+        "\\n" @ 10..12: EscapeSequence
+        "world" @ 12..17: String
+        "\\t" @ 17..19: EscapeSequence
+        "!\"" @ 19..21: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_backslash() {
+        let test = SemanticTokenTest::new(r#"x = "path\\to\\file""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "x" @ 0..1: Variable [definition]
+        "\"path" @ 4..9: String
+        "\\\\" @ 9..11: EscapeSequence
+        "to" @ 11..13: String
+        "\\\\" @ 13..15: EscapeSequence
+        "file\"" @ 15..20: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_hex() {
+        let test = SemanticTokenTest::new(r#"x = "hello\x00world""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "x" @ 0..1: Variable [definition]
+        "\"hello" @ 4..10: String
+        "\\x00" @ 10..14: EscapeSequence
+        "world\"" @ 14..20: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_unicode() {
+        let test = SemanticTokenTest::new(r#"x = "caf\u00e9""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "x" @ 0..1: Variable [definition]
+        "\"caf" @ 4..8: String
+        "\\u00e9" @ 8..14: EscapeSequence
+        "\"" @ 14..15: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_unicode_long() {
+        let test = SemanticTokenTest::new(r#"x = "\U0001F600""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "x" @ 0..1: Variable [definition]
+        "\"" @ 4..5: String
+        "\\U0001F600" @ 5..15: EscapeSequence
+        "\"" @ 15..16: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_unicode_name() {
+        let test = SemanticTokenTest::new(r#"x = "\N{SNOWMAN}""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "x" @ 0..1: Variable [definition]
+        "\"" @ 4..5: String
+        "\\N{SNOWMAN}" @ 5..16: EscapeSequence
+        "\"" @ 16..17: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_octal() {
+        let test = SemanticTokenTest::new(r#"x = "\101\12\7""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "x" @ 0..1: Variable [definition]
+        "\"" @ 4..5: String
+        "\\101" @ 5..9: EscapeSequence
+        "\\12" @ 9..12: EscapeSequence
+        "\\7" @ 12..14: EscapeSequence
+        "\"" @ 14..15: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_raw_string() {
+        // Raw strings should NOT highlight escape sequences
+        let test = SemanticTokenTest::new(r#"x = r"hello\nworld""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "x" @ 0..1: Variable [definition]
+        "r\"hello\\nworld\"" @ 4..19: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_bytes() {
+        let test = SemanticTokenTest::new(r#"x = b"hello\nworld""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "x" @ 0..1: Variable [definition]
+        "b\"hello" @ 4..11: String
+        "\\n" @ 11..13: EscapeSequence
+        "world\"" @ 13..19: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_bytes_no_unicode() {
+        // Unicode escapes are NOT valid in byte strings
+        let test = SemanticTokenTest::new(r#"x = b"hello\u0041world""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "x" @ 0..1: Variable [definition]
+        "b\"hello\\u0041world\"" @ 4..23: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_fstring() {
+        let test = SemanticTokenTest::new(r#"x = f"hello\nworld""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "x" @ 0..1: Variable [definition]
+        "hello" @ 6..11: String
+        "\\n" @ 11..13: EscapeSequence
+        "world" @ 13..18: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_fstring_with_expr() {
+        let test = SemanticTokenTest::new(r#"name = "world"; x = f"hello\n{name}!""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "name" @ 0..4: Variable [definition]
+        "\"world\"" @ 7..14: String
+        "x" @ 16..17: Variable [definition]
+        "hello" @ 22..27: String
+        "\\n" @ 27..29: EscapeSequence
+        "name" @ 30..34: Variable
+        "!" @ 35..36: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_triple_quoted() {
+        let test = SemanticTokenTest::new(
+            r#"x = """line1\nline2\tindented""""#,
+        );
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "x" @ 0..1: Variable [definition]
+        "\"\"\"line1" @ 4..12: String
+        "\\n" @ 12..14: EscapeSequence
+        "line2" @ 14..19: String
+        "\\t" @ 19..21: EscapeSequence
+        "indented\"\"\"" @ 21..32: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_tstring() {
+        let test = SemanticTokenTest::new(r#"x = t"hello\nworld""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "x" @ 0..1: Variable [definition]
+        "hello" @ 6..11: String
+        "\\n" @ 11..13: EscapeSequence
+        "world" @ 13..18: String
+        "#);
+    }
+
+    #[test]
+    fn escape_sequences_tstring_with_expr() {
+        let test = SemanticTokenTest::new(r#"name = "world"; x = t"hello\n{name}!""#);
+
+        let tokens = test.highlight_file();
+
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "name" @ 0..4: Variable [definition]
+        "\"world\"" @ 7..14: String
+        "x" @ 16..17: Variable [definition]
+        "hello" @ 22..27: String
+        "\\n" @ 27..29: EscapeSequence
+        "name" @ 30..34: Variable
+        "!" @ 35..36: String
+        "#);
     }
 }
