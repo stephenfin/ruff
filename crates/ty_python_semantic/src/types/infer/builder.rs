@@ -14453,7 +14453,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         slice_ty: Type<'db>,
         expr_context: ExprContext,
     ) -> Type<'db> {
-        match value_ty.infer_subscript_expression_types(
+        match value_ty.subscript(
             self.db(),
             slice_ty,
             expr_context,
