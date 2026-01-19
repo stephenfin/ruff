@@ -126,3 +126,22 @@ def g(x: Baz):
         # error: [invalid-argument-type]
         reveal_type(x["hello"])  # revealed: str
 ```
+
+When both elements have `__getitem__` but both fail, we report errors for each element.
+
+```py
+class A:
+    def __getitem__(self, key: int) -> str:
+        return ""
+
+class B:
+    def __getitem__(self, key: str) -> int:
+        return 0
+
+def h(x: A):
+    if isinstance(x, B):
+        # x is A & B. A expects int, B expects str. A list satisfies neither.
+        # error: [invalid-argument-type]
+        # error: [invalid-argument-type]
+        reveal_type(x[[]])  # revealed: Never
+```
