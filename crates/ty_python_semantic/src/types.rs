@@ -78,8 +78,8 @@ use crate::unpack::EvaluationMode;
 use crate::{Db, FxOrderSet, Program};
 pub use class::KnownClass;
 pub(crate) use class::{ClassLiteral, ClassType, GenericAlias, StaticClassLiteral};
-pub use instance::{NominalInstanceType, ProtocolInstanceType};
 use instance::Protocol;
+pub use instance::{NominalInstanceType, ProtocolInstanceType};
 pub use special_form::SpecialFormType;
 
 mod bound_super;

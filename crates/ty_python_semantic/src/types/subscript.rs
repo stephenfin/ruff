@@ -2,9 +2,9 @@ use itertools::Itertools;
 use ruff_python_ast as ast;
 
 use crate::place::{DefinedPlace, Definedness, Place};
+use crate::semantic_index::SemanticIndex;
 use crate::semantic_index::definition::Definition;
 use crate::semantic_index::scope::ScopeId;
-use crate::semantic_index::SemanticIndex;
 use crate::subscript::{PyIndex, PySlice};
 use crate::{Db, FxOrderSet};
 
@@ -23,7 +23,9 @@ use super::instance::SliceLiteral;
 use super::special_form::SpecialFormType;
 use super::tuple::{Tuple, TupleSpec};
 use super::visitor::any_over_type;
-use super::{DynamicType, KnownInstanceType, Type, TypeAliasType, UnionBuilder, UnionType, todo_type};
+use super::{
+    DynamicType, KnownInstanceType, Type, TypeAliasType, UnionBuilder, UnionType, todo_type,
+};
 
 #[derive(Debug)]
 pub(crate) struct SubscriptError<'db> {
@@ -32,7 +34,7 @@ pub(crate) struct SubscriptError<'db> {
 }
 
 #[derive(Debug)]
-pub(crate) enum SubscriptErrorKind<'db> {
+enum SubscriptErrorKind<'db> {
     /// An index is out of bounds for a literal tuple/string/bytes subscript.
     IndexOutOfBounds {
         kind: &'static str,
@@ -81,14 +83,14 @@ pub(crate) enum SubscriptErrorKind<'db> {
 }
 
 impl<'db> SubscriptError<'db> {
-    pub(super) fn new(result_ty: Type<'db>, error: SubscriptErrorKind<'db>) -> Self {
+    fn new(result_ty: Type<'db>, error: SubscriptErrorKind<'db>) -> Self {
         Self {
             result_ty,
             errors: vec![error],
         }
     }
 
-    pub(super) fn with_errors(result_ty: Type<'db>, errors: Vec<SubscriptErrorKind<'db>>) -> Self {
+    fn with_errors(result_ty: Type<'db>, errors: Vec<SubscriptErrorKind<'db>>) -> Self {
         Self { result_ty, errors }
     }
 
@@ -253,7 +255,7 @@ impl<'db> SubscriptErrorKind<'db> {
     }
 }
 
-pub(super) fn map_union_subscript<'db, F>(
+fn map_union_subscript<'db, F>(
     db: &'db dyn Db,
     union: UnionType<'db>,
     mut map_fn: F,
