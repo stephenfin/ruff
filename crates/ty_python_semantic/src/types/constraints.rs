@@ -1184,8 +1184,15 @@ impl<'db> Node<'db> {
     ) -> Self {
         // To implement the "linear" shape described above, we could collect the iterator elements
         // into a vector, and then use the fold at the bottom of this method to combine the
-        // elements using the operator.
-        //
+        // elements using the operator. And in fact, if the iterator is small enough, we go ahead
+        // and do that.
+        let (_, max_size) = nodes.size_hint();
+        #[expect(clippy::items_after_statements)]
+        const MIN_SIZE_TO_BE_CLEVER: usize = 4;
+        if max_size.is_some_and(|size| size <= MIN_SIZE_TO_BE_CLEVER) {
+            return nodes.fold(zero, |result, node| combine(result, db, node));
+        }
+
         // To implement the "tree" shape, we also maintain a "depth" for each element of the
         // vector, which indicates how many times the operator has been applied to the element.
         // As we collect elements into the vector, we keep it capped at a length `O(log n)` of the
