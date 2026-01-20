@@ -126,8 +126,8 @@ use crate::types::{
     ParameterForm, Parameters, Signature, SpecialFormType, StaticClassLiteral, SubclassOfType,
     TrackedConstraintSet, Truthiness, Type, TypeAliasType, TypeAndQualifiers, TypeContext,
     TypeQualifiers, TypeVarBoundOrConstraints, TypeVarBoundOrConstraintsEvaluation,
-    TypeVarDefaultEvaluation, TypeVarIdentity, TypeVarInstance, TypeVarKind, TypeVarVariance,
-    TypedDictType, UnionBuilder, UnionType, UnionTypeInstance, binding_type,
+    TypeVarConstraints, TypeVarDefaultEvaluation, TypeVarIdentity, TypeVarInstance, TypeVarKind,
+    TypeVarVariance, TypedDictType, UnionBuilder, UnionType, UnionTypeInstance, binding_type,
     definition_expression_type, infer_complete_scope_types, infer_scope_types, todo_type,
 };
 use crate::types::{CallableTypes, overrides};
@@ -12230,6 +12230,34 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         }
     }
 
+    /// Maps an operation over each constraint of a constrained `TypeVar`.
+    ///
+    /// Returns the original `TypeVar` if each result is equivalent to its input constraint;
+    /// otherwise returns the union of all results.
+    fn map_constrained_typevar_constraints(
+        db: &'db dyn Db,
+        typevar: Type<'db>,
+        constraints: TypeVarConstraints<'db>,
+        mut op: impl FnMut(Type<'db>) -> Option<Type<'db>>,
+    ) -> Option<Type<'db>> {
+        let mut builder = UnionBuilder::new(db);
+        let mut any_different = false;
+
+        for constraint in constraints.elements(db) {
+            let result = op(*constraint)?;
+            if !result.is_equivalent_to(db, *constraint) {
+                any_different = true;
+            }
+            builder = builder.add(result);
+        }
+
+        Some(if any_different {
+            builder.build()
+        } else {
+            typevar
+        })
+    }
+
     fn infer_binary_expression_type(
         &mut self,
         node: AnyNodeRef<'_>,
@@ -12293,6 +12321,42 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 alias.value_type(self.db()),
                 op,
             ),
+
+            // When both operands are the same constrained TypeVar (e.g., `T: (int, str)`),
+            // we check if the operation is valid for each constraint paired with itself.
+            // This is different from treating it as a union, where we'd check all combinations.
+            // For example, `T + T` where `T: (int, str)` should check `int + int` and `str + str`,
+            // not `int + str` which would fail.
+            //
+            // If each constraint's operation returns the same type as the constraint (e.g.,
+            // `int + int -> int`), we return the TypeVar to preserve the generic relationship.
+            // Otherwise, we return the union of the return types.
+            (Type::TypeVar(left_tvar), Type::TypeVar(right_tvar), _)
+                if left_tvar.identity(self.db()) == right_tvar.identity(self.db()) =>
+            {
+                match left_tvar.typevar(self.db()).bound_or_constraints(self.db()) {
+                    Some(TypeVarBoundOrConstraints::Constraints(constraints)) => {
+                        Self::map_constrained_typevar_constraints(
+                            self.db(),
+                            left_ty,
+                            constraints,
+                            |constraint| {
+                                self.infer_binary_expression_type(
+                                    node,
+                                    emitted_division_by_zero_diagnostic,
+                                    constraint,
+                                    constraint,
+                                    op,
+                                )
+                            },
+                        )
+                    }
+                    // For bounded TypeVars or unconstrained TypeVars, fall through to the default handling.
+                    _ => Type::try_call_bin_op(self.db(), left_ty, op, right_ty)
+                        .map(|outcome| outcome.return_type(self.db()))
+                        .ok(),
+                }
+            }
 
             // `try_call_bin_op` works for almost all `NewType`s, but not for `NewType`s of `float`
             // and `complex`, where the concrete base type is a union. In that case it turns out
