@@ -1182,10 +1182,8 @@ impl<'db> Node<'db> {
         one: Self,
         mut combine: impl FnMut(Self, &'db dyn Db, Self) -> Self,
     ) -> Self {
-        // To implement the "linear" shape described above, we could collect the iterator elements
-        // into a vector, and then use the fold at the bottom of this method to combine the
-        // elements using the operator. And in fact, if the iterator is small enough, we go ahead
-        // and do that.
+        // If the iterator is small enough, we don't have to be clever; just fold the elements
+        // using the operator and return.
         let (_, max_size) = nodes.size_hint();
         #[expect(clippy::items_after_statements)]
         const MIN_SIZE_TO_BE_CLEVER: usize = 4;
@@ -1193,6 +1191,10 @@ impl<'db> Node<'db> {
             return nodes.fold(zero, |result, node| combine(result, db, node));
         }
 
+        // To implement the "linear" shape described above, we could collect the iterator elements
+        // into a vector, and then use the fold at the bottom of this method to combine the
+        // elements using the operator.
+        //
         // To implement the "tree" shape, we also maintain a "depth" for each element of the
         // vector, which indicates how many times the operator has been applied to the element.
         // As we collect elements into the vector, we keep it capped at a length `O(log n)` of the
@@ -1203,13 +1205,13 @@ impl<'db> Node<'db> {
         //
         // Walking through the example above, our vector ends up looking like:
         //
-        //                                   a/0
-        //                        a/0 b/0 => a∨b/1
-        //                                   a∨b/1 c/0
-        //   a∨b/1 c/0 d/0 => a∨b/1 c∨d/1 => a∨b∨c∨d/2
-        //                                   a∨b∨c∨d/2 e/0
-        //              a∨b∨c∨d/2 e/0 f/0 => a∨b∨c∨d/2 e∨f/1
-        //                                   a∨b∨c∨d/2 e∨f/1 g/0
+        //                                a/0
+        //                     a/0 b/0 => ab/1
+        //                                ab/1 c/0
+        //   ab/1 c/0 d/0 => ab/1 cd/1 => abcd/2
+        //                                abcd/2 e/0
+        //              abcd/2 e/0 f/0 => abcd/2 ef/1
+        //                                abcd/2 ef/1 g/0
         //
         // We use a SmallVec for the accumulator so that we don't have to spill over to the heap
         // until the iterator passes 256 elements.
